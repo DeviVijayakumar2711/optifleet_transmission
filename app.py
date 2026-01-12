@@ -43,10 +43,18 @@ def load_and_analyze_data():
     try:
         df = pd.read_csv("pred_trans_full_final.csv")
         
-        # --- THE FIX: CLEAN COLUMN NAMES ---
-        # This removes hidden spaces (e.g., "Depot " -> "Depot")
+        # --- SMART COLUMN CLEANER (Fixes the Depot Issue) ---
+        # 1. Strip whitespace from all columns
         df.columns = df.columns.str.strip()
         
+        # 2. Rename ambiguous columns to standard names
+        # This finds any column containing "Depot" (case insensitive) and renames it to "Depot"
+        for col in df.columns:
+            if "depot" in col.lower():
+                df.rename(columns={col: "Depot"}, inplace=True)
+            if "bus" in col.lower() and "no" in col.lower():
+                df.rename(columns={col: "Bus No"}, inplace=True)
+
     except FileNotFoundError:
         st.error("⚠️ Critical: 'pred_trans_full_final.csv' not found.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
@@ -171,8 +179,9 @@ status_colors = {
 # -----------------------------------------------------------------------------
 # 3. DASHBOARD UI
 # -----------------------------------------------------------------------------
-st.title("🚍 Transmission Maintenance Analyst Dashboard (Volvo B9TL)")
-st.caption(f"Report Date: {datetime.now().strftime('%d %b %Y')} | Schedule Logic: Capacity Constrained (3-4/Month)")
+# Updated Title with Version Number to verify deployment
+st.title("🚍 Transmission Maintenance Analyst Dashboard (v3.1)")
+st.caption(f"Report Date: {datetime.now().strftime('%d %b %Y')} | Bus Model: Volvo B9TL")
 
 if not df.empty:
     
@@ -192,13 +201,23 @@ if not df.empty:
     # --- TABS ---
     tab1, tab2, tab3 = st.tabs(["📊 Actionable Insights", "📉 Survival Analysis", "📋 Master Data (Analyst View)"])
 
+    # =========================================================================
     # TAB 1: INSIGHTS
+    # =========================================================================
     with tab1:
         c_left, c_right = st.columns([1.5, 1])
         
         with c_left:
             st.subheader("1. Fleet Health Matrix")
-            # Scatter
+            
+            # --- SUMMARY 1 (SCATTER) ---
+            st.info("""
+            **📊 Analyst Interpretation: Risk Matrix**
+            * **X-Axis (Usage):** Current component mileage.
+            * **Y-Axis (Age):** Bus age. Older buses (Top) with high mileage (Right) fail most frequently.
+            * **Red Line:** Historical failure average. Buses past this line are operating on borrowed time.
+            """)
+            
             fig_scatter = px.scatter(
                 df, x='Current_Comp_Usage', y='Bus_Age_Years',
                 color='Action_Status', color_discrete_map=status_colors,
@@ -208,9 +227,15 @@ if not df.empty:
             fig_scatter.add_vline(x=target_km, line_dash="dash", line_color="red", annotation_text="Avg Failure")
             st.plotly_chart(fig_scatter, use_container_width=True)
             
-            # --- DEPOT ANALYSIS (FIXED) ---
+            # --- SUMMARY 2 (DEPOT) ---
             st.subheader("2. Depot Workload Analysis")
-            if 'Depot' in df.columns: 
+            if 'Depot' in df.columns:
+                st.info("""
+                **🏭 Analyst Interpretation: Depot Load**
+                * **Box Height:** Shows variation. A tall box means inconsistent usage (some buses sit, some run hard).
+                * **Outliers (Dots):** Specific buses that are being over-utilized compared to their depot peers.
+                """)
+                
                 fig_depot = px.box(
                     df, x='Depot', y='Current_Comp_Usage', 
                     color='Action_Status', color_discrete_map=status_colors,
@@ -219,7 +244,7 @@ if not df.empty:
                 )
                 st.plotly_chart(fig_depot, use_container_width=True)
             else:
-                st.warning("Depot column missing. Checked columns: " + ", ".join(df.columns))
+                st.warning("Depot column missing in data.")
 
         with c_right:
             st.markdown('<div class="priority-header">🔥 Priority Action List</div>', unsafe_allow_html=True)
@@ -232,27 +257,42 @@ if not df.empty:
                     action_list[['Bus No', 'Bus Model', 'Pred_Month_Str', 'Current_Comp_Usage']]
                     .style.format({'Current_Comp_Usage': '{:,.0f}'})
                     .applymap(lambda x: 'background-color: #ffcccc' if 'Critical' in str(x) else '', subset=pd.IndexSlice[:, :]),
-                    use_container_width=True, height=500
+                    use_container_width=True,
+                    height=500
                 )
             else:
                 st.success("✅ Schedule Clear.")
 
-    # TAB 2: SURVIVAL
+    # =========================================================================
+    # TAB 2: SURVIVAL ANALYSIS
+    # =========================================================================
     with tab2:
-        st.subheader("Reliability Analysis")
+        st.subheader("Reliability Analysis (AI Models)")
+        
+        # --- SUMMARY 3 (SURVIVAL) ---
+        st.success("""
+        **🧠 Analyst Interpretation: Survival Curves**
+        * **Orange Line (90% Limit):** This is your 'Safe Operating Limit'. 10% of units fail by this point.
+        * **Steep Drop:** Indicates the 'danger zone' where failures accelerate rapidly.
+        """)
+
         c_surv1, c_surv2 = st.columns(2)
+        
         with c_surv1:
             st.markdown("##### 📉 Survival by Mileage")
             fig_km = px.line(km_surv, x='x', y='prob', title="Prob. of Survival vs. Km")
             fig_km.add_hline(y=0.9, line_dash="dot", line_color="orange", annotation_text="90% Limit")
             st.plotly_chart(fig_km, use_container_width=True)
+
         with c_surv2:
             st.markdown("##### 📉 Survival by Age")
             fig_age = px.line(age_surv, x='x', y='prob', title="Prob. of Survival vs. Years")
             fig_age.add_hline(y=0.9, line_dash="dot", line_color="orange", annotation_text="90% Limit")
             st.plotly_chart(fig_age, use_container_width=True)
 
+    # =========================================================================
     # TAB 3: MASTER DATA
+    # =========================================================================
     with tab3:
         st.subheader("Master Fleet Register")
         
@@ -276,13 +316,11 @@ if not df.empty:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Export CSV", data=csv, file_name="SMRT_Analyst_Report.csv", mime="text/csv", type="primary")
 
-        # Select columns to display
         display_cols = [
             'Bus No', 'Bus Model', 'Action_Status', 'Pred_Month_Str', 'Health_Score', 'Depot',
             'Bus_Age_Years', 'Odometer_latest', 'Current_Comp_Usage',
             'Repl_Count', 'Registration Date', 'Replacement Date'
         ]
-        valid_cols = [c for c in display_cols if c in df.columns]
         
         format_dict = {
             'Bus_Age_Years': '{:.1f}', 'Odometer_latest': '{:,.0f}',
@@ -291,6 +329,8 @@ if not df.empty:
             'Replacement Date': lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else "-"
         }
         
+        valid_cols = [c for c in display_cols if c in df.columns]
+
         st.dataframe(
             df[valid_cols].sort_values('Action_Status').style
             .format(format_dict)
