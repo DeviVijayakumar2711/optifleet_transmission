@@ -50,14 +50,13 @@ def load_and_combine_data():
     try:
         df_b = pd.read_csv(FILE_B9TL)
         df_b.columns = df_b.columns.str.strip() 
-        df_b = df_b.loc[:, ~df_b.columns.duplicated()] # Drop Duplicates
+        df_b = df_b.loc[:, ~df_b.columns.duplicated()]
         
         df_b['Bus Model'] = 'Volvo B9TL'
         
         # Map to Standard Variables
         b_map = {
-            'Reg No.': 'Bus No', 
-            'Bus Number': 'Bus No',
+            'Reg No.': 'Bus No', 'Bus Number': 'Bus No',
             'Registration Date': 'Registration Date',
             'Replacement Date': 'Replacement Date',
             'Pred Replacement Date': 'Pred Replacement Date',
@@ -123,7 +122,6 @@ def analyze_data(df, selected_model):
     date_cols = ['Registration Date', 'Replacement Date', 'Pred Replacement Date']
     for col in date_cols:
         if col in df.columns:
-            # Try parsing with dayfirst=True for DD/MM/YYYY support
             df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
 
     today = pd.Timestamp.now()
@@ -134,9 +132,8 @@ def analyze_data(df, selected_model):
     df['Bus_Age_Days'] = (today - df['Registration Date']).dt.days
     df['Bus_Age_Years'] = df['Bus_Age_Days'] / 365.25
     
-    # FILTER: Only keep valid buses (Age > 0)
+    # FILTER: Only keep valid buses
     df = df[df['Bus_Age_Days'] > 0].copy()
-    
     if df.empty: return df, pd.DataFrame(), pd.DataFrame(), 0
     
     # Odometer Fill
@@ -179,17 +176,16 @@ def analyze_data(df, selected_model):
         usage_score = max(0, 1 - (row['Daily_Usage_km'] / 350))
         wear_score = max(0, 1 - (row['Current_Comp_Usage'] / (target_km * 1.2)))
         health_score = (0.3 * age_score + 0.3 * usage_score + 0.4 * wear_score) * 100
-        # Return as LIST to guarantee DataFrame creation
         return [remaining_km, health_score]
 
-    # Robust Apply
+    # Robust List Apply
     metrics_list = df.apply(calculate_metrics, axis=1).tolist()
     metrics_df = pd.DataFrame(metrics_list, index=df.index, columns=['Remaining_Km', 'Health_Score'])
     
     df['Remaining_Km'] = metrics_df['Remaining_Km']
     df['Health_Score'] = metrics_df['Health_Score']
 
-    # --- E. CAPACITY-CONSTRAINED SCHEDULING ---
+    # --- E. CAPACITY-CONSTRAINED SCHEDULING (FIXED CRASH HERE) ---
     urgent_mask = (df['Remaining_Km'] < 20000)
     df_urgent = df[urgent_mask].sort_values('Health_Score', ascending=True).copy()
     df_safe = df[~urgent_mask].copy()
@@ -198,6 +194,7 @@ def analyze_data(df, selected_model):
     new_dates = []
     new_days_rem = []
     
+    # Urgent Buses
     for i in range(len(df_urgent)):
         scheduled_days = (i + 1) * days_buffer
         scheduled_date = today + timedelta(days=scheduled_days)
@@ -207,7 +204,14 @@ def analyze_data(df, selected_model):
     df_urgent['New_Pred_Date'] = new_dates
     df_urgent['Days_Rem'] = new_days_rem
     
-    df_safe['Days_Rem'] = df_safe['Remaining_Km'] / df_safe['Daily_Usage_km']
+    # Safe Buses (The Fix is here)
+    # Prevent Division by Zero
+    safe_usage = df_safe['Daily_Usage_km'].replace(0, 0.01)
+    df_safe['Days_Rem'] = df_safe['Remaining_Km'] / safe_usage
+    
+    # CAP THE DAYS to ~20 years (7300 days) to prevent OutOfBoundsDatetime
+    df_safe['Days_Rem'] = df_safe['Days_Rem'].clip(upper=7300)
+    
     df_safe['New_Pred_Date'] = today + pd.to_timedelta(df_safe['Days_Rem'], unit='D')
     
     df = pd.concat([df_urgent, df_safe])
@@ -254,31 +258,21 @@ raw_df = load_and_combine_data()
 with st.sidebar:
     st.header("🔍 Fleet Selection")
     if not raw_df.empty:
-        # Get raw model names
         raw_models = sorted(raw_df['Bus Model'].unique())
         
-        # DISPLAY MAPPING (Renaming for Dropdown)
         display_map = {
             "Volvo B9TL": "Transmission - B9TL",
             "MAN A95": "Transmission - A95"
         }
-        
-        # Reverse map to find actual value based on display name
         reverse_map = {v: k for k, v in display_map.items()}
-        
-        # Create display list
         display_options = [display_map.get(m, m) for m in raw_models]
         
-        # Default Selection
         default_idx = 0
         if "Transmission - B9TL" in display_options:
             default_idx = display_options.index("Transmission - B9TL")
             
         selected_display = st.selectbox("Select Bus Model", display_options, index=default_idx)
-        
-        # Convert back to internal name for processing
         selected_model = reverse_map.get(selected_display, selected_display)
-        
     else:
         selected_model = "All"
         selected_display = "All"
@@ -332,7 +326,6 @@ if not df.empty:
             * **Red Line:** Historical failure average. Buses past this line are operating on borrowed time.
             """)
             
-            # Ensure unique columns for plot
             plot_df = df.loc[:, ~df.columns.duplicated()]
             
             fig_scatter = px.scatter(
