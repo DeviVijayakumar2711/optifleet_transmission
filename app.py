@@ -116,7 +116,7 @@ def load_all_data():
     return full_df
 
 # -----------------------------------------------------------------------------
-# 3. BALANCED ANALYTIC ENGINE (STRICT QUOTA + HEALTH SCORE)
+# 3. BALANCED ANALYTIC ENGINE
 # -----------------------------------------------------------------------------
 def process_data(df, selected_comp, selected_model):
     df = df[(df['Component'] == selected_comp) & (df['Bus Model'] == selected_model)].copy()
@@ -159,7 +159,7 @@ def process_data(df, selected_comp, selected_model):
     else:
         target_km = max(target_km_hist, 450000)
 
-    # 4. HEALTH SCORE
+    # 4. HEALTH SCORE (DISPLAY ONLY - 30/30/40 Formula)
     usage_factor = 100 - (df['Curr_Comp_Km'] / target_km * 100)
     usage_factor = usage_factor.clip(0, 100)
     
@@ -172,11 +172,17 @@ def process_data(df, selected_comp, selected_model):
     df['Health_Score'] = (0.30 * age_factor) + (0.30 * usage_factor) + (0.40 * wear_factor)
     df['Health_Score'] = df['Health_Score'].astype(int)
 
-    # 5. RISK & QUOTA (STRICT)
-    df['Risk_Score'] = 100 - df['Health_Score']
-    df['Sort_Score'] = df['Risk_Score'] + (df['Faults'] * 20)
+    # 5. RISK SCORE (ACTION PRIORITY - Usage Driven)
+    # We use a separate "Risk Score" for sorting that heavily weights Usage (Mileage).
+    # This prevents low-mileage buses with faults from jumping the queue.
     
-    df = df.sort_values('Sort_Score', ascending=False).reset_index(drop=True)
+    df['Usage_Pct'] = (df['Curr_Comp_Km'] / target_km) * 100
+    
+    # Risk Formula: 80% Usage, 10% Faults, 5% Accidents
+    df['Risk_Score'] = (df['Usage_Pct'] * 0.8) + (df['Faults'] * 10) + (df['Accidents'] * 5)
+    
+    # Sort strictly by Risk
+    df = df.sort_values('Risk_Score', ascending=False).reset_index(drop=True)
     
     crit_limit = 5
     prio_limit = 15
@@ -185,6 +191,14 @@ def process_data(df, selected_comp, selected_model):
     date_list = []
     
     for idx, row in df.iterrows():
+        # SAFETY CHECK: If usage is < 50%, force Monitor (Green)
+        if row['Usage_Pct'] < 50:
+            status_list.append("Monitor (6 Mo)")
+            future_days = 365 + (idx * 2)
+            date_list.append(today + timedelta(days=future_days))
+            continue
+
+        # Otherwise apply quota
         if idx < crit_limit:
             status_list.append("Critical (1 Mo)")
             date_list.append(today + timedelta(days=30))
@@ -239,7 +253,7 @@ with st.sidebar:
 # Process
 df, target_km, surv_km, surv_age = process_data(raw_df, sel_comp, sel_model)
 
-# Colors (Green for Monitor)
+# Colors
 status_colors = {
     'Healthy': '#2ecc71',         
     'Monitor (6 Mo)': '#2ecc71',  # GREEN
@@ -300,7 +314,8 @@ if not df.empty:
 
         with c_right:
             st.markdown('<div class="priority-header">🔥 Priority Action List</div>', unsafe_allow_html=True)
-            urgent = df.sort_values('Sort_Score', ascending=False).head(20)
+            # Sort by Risk Score for the list
+            urgent = df.sort_values('Risk_Score', ascending=False).head(20)
             if not urgent.empty:
                 st.dataframe(
                     urgent[['Bus No', 'Status', 'Pred_Month_Str', 'Curr_Comp_Km', 'Faults']]
@@ -346,12 +361,15 @@ if not df.empty:
             st.markdown("""
             #### 🧮 Health Score Formula (0-100)
             $$Score = (30\% \\times Age Factor) + (30\% \\times Usage Factor) + (40\% \\times Wear Factor)$$
+            *For Display Only.*
+            
+            #### ⚠️ Risk Score (For Sorting)
+            *Action Priority is calculated based on **Usage (80%)** and **Faults (20%)** to ensure high-mileage buses are prioritized.*
             
             #### 📝 Metric Definitions
             | Field Name | Description |
             | :--- | :--- |
             | **Usage Factor** | Based on mileage vs target life. |
-            | **Wear Factor** | Penalized by Faults (-15) and Accidents (-10). |
             | **Action_Status** | **Critical:** Top 5 highest risk. **Priority:** Next 15. |
             """)
 
